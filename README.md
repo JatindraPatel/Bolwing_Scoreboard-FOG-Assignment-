@@ -2,8 +2,8 @@
 
 This project was built for the **Computer Vision Engineer Assignment (Round 1) at FOG**.
 It extracts scoreboard data (player names, frame scores, pins knocked down, totals, etc.)
-from a bowling alley video using frame sampling, Region-of-Interest (ROI) cropping, and
-OCR (Optical Character Recognition).
+from a bowling alley video using frame sampling, ROI cropping, OCR, and a bit of
+post-processing that turns raw OCR text back into the scoreboard's row/column structure.
 
 ---
 
@@ -19,25 +19,36 @@ Given a video of a bowling scoreboard display, build a Computer Vision pipeline 
 
 ## 🧠 Approach
 
-Since bowling scoreboard displays are usually static overlays positioned at the **top of
-the screen**, the pipeline avoids processing every single frame (which would be slow and
-redundant) and instead:
+Bowling scoreboard displays are static overlays positioned at the **top of the screen**,
+so the pipeline avoids running OCR on every single frame and instead:
 
-1. **Frame Sampling** – Reads the video and processes every **30th frame** (~1 frame/sec
-   at 30 FPS), which is more than enough since scoreboard values don't change every frame.
-2. **ROI Cropping** – Instead of running OCR on the full frame, the script crops the
-   **top 40% of the frame**, where the scoreboard is consistently located. This reduces
-   noise, speeds up OCR, and improves accuracy by removing irrelevant background (lanes,
-   players, pins, etc.).
-3. **Preprocessing** – Converts the cropped ROI to grayscale to improve OCR readability
-   and reduce the effect of lighting/color variation on the display.
+1. **Frame Sampling** – Reads the video and processes every **Nth frame** (default: 30,
+   ~1 frame/sec at 30 FPS) — configurable via CLI, since scoreboard values don't change
+   every frame.
+2. **ROI Cropping** – Crops the **top 40% of the frame** (configurable), where the
+   scoreboard is consistently located, instead of running OCR on the full frame. This
+   removes irrelevant background (lanes, players, pins) and speeds up OCR.
+3. **Preprocessing** – Converts the cropped ROI to grayscale to improve OCR readability.
 4. **OCR Extraction** – Uses **EasyOCR** to detect and read all text within the cropped
-   scoreboard region (player names, frame-by-frame pin counts, totals, etc.).
-5. **Confidence Filtering** – Discards OCR detections with a confidence score below
-   `0.3` to filter out noisy/false text detections.
-6. **Structured Output** – Saves the results (frame number, timestamp, detected text)
-   into a JSON file (`output_scoreboard.json`), and also saves each processed/cropped
-   frame as an image in `extracted_frames/` for verification and debugging.
+   scoreboard region.
+5. **Confidence Filtering** – Discards OCR detections below a configurable confidence
+   threshold (default `0.3`).
+6. **Row Reconstruction** – This is the part most basic OCR scripts skip: EasyOCR returns
+   a flat, unordered list of text strings, which loses the scoreboard's grid structure.
+   This project clusters each detection by its **vertical (y) position** to regroup
+   the raw text back into rows (one row per player/header line), and sorts each row
+   left-to-right, so the output actually mirrors the scoreboard layout instead of being
+   a jumbled list.
+7. **Duplicate Skipping** – Since the scoreboard often doesn't change for several seconds
+   at a time, consecutive sampled frames with *identical* detected text are skipped by
+   default (`--keep-duplicates` to disable this), so the output isn't full of repeated,
+   redundant entries.
+8. **Visual Verification** – Every kept frame's OCR detections are drawn as bounding
+   boxes + labels on a copy of the cropped ROI and saved to `annotated_frames/`, so the
+   detection step can be visually verified frame-by-frame instead of trusting a black box.
+9. **Structured Output** – Results are saved to both **JSON** (`output_scoreboard.json`,
+   with the reconstructed rows included) and a flattened **CSV** (`output_scoreboard.csv`)
+   for quick inspection in a spreadsheet.
 
 ---
 
@@ -48,7 +59,8 @@ redundant) and instead:
 | Language          | Python 3.10+ |
 | Video Processing  | OpenCV (`opencv-python`) |
 | OCR Engine        | EasyOCR |
-| Output Format     | JSON |
+| Array/Geometry    | NumPy |
+| Output Formats    | JSON, CSV |
 
 ---
 
@@ -56,10 +68,12 @@ redundant) and instead:
 
 ```
 .
-├── main.py                     # Main script — video processing + OCR pipeline
+├── main.py                     # Main script — video processing + OCR + row reconstruction
 ├── bowling_scoreboard.mp4      # Input video (sample scoreboard footage)
 ├── extracted_frames/           # Auto-generated cropped scoreboard frames
-├── output_scoreboard.json      # Auto-generated structured OCR output
+├── annotated_frames/           # Auto-generated frames with OCR boxes drawn on them
+├── output_scoreboard.json      # Auto-generated structured OCR output (with rows)
+├── output_scoreboard.csv       # Auto-generated flattened CSV output
 └── README.md
 ```
 
@@ -82,27 +96,41 @@ redundant) and instead:
 
 3. Install dependencies
    ```bash
-   pip install opencv-python easyocr
+   pip install opencv-python easyocr numpy
    ```
 
 ---
 
 ## ▶️ Usage
 
-1. Place your input video in the project root and update the filename if needed
-   (default: `bowling_scoreboard.mp4`) in the last line of `main.py`:
-   ```python
-   process_scoreboard_video("bowling_scoreboard.mp4")
-   ```
+Run with defaults (looks for `bowling_scoreboard.mp4` in the current folder):
+```bash
+python main.py
+```
 
-2. Run the script:
-   ```bash
-   python main.py
-   ```
+Or point it at a specific video and tweak the pipeline via CLI flags:
+```bash
+python main.py path/to/video.mp4 --every 20 --roi 0.35 --min-conf 0.4
+```
 
-3. On completion, you will get:
-   - `extracted_frames/` → cropped scoreboard images for every sampled frame
-   - `output_scoreboard.json` → structured OCR results
+| Flag | Default | Description |
+|------|---------|--------------|
+| `video` (positional) | `bowling_scoreboard.mp4` | Path to the input video |
+| `--every` | `30` | Process every Nth frame |
+| `--roi` | `0.40` | Fraction of frame height (from top) treated as scoreboard ROI |
+| `--min-conf` | `0.30` | Minimum OCR confidence to keep a detection |
+| `--out-json` | `output_scoreboard.json` | JSON output path |
+| `--out-csv` | `output_scoreboard.csv` | CSV output path |
+| `--frames-dir` | `extracted_frames` | Where cropped ROI frames are saved |
+| `--annotated-dir` | `annotated_frames` | Where annotated (boxed) ROI frames are saved |
+| `--keep-duplicates` | off | Save every sampled frame, even unchanged ones |
+| `--gpu` | off | Use GPU for OCR if available |
+
+On completion you get:
+- `extracted_frames/` → plain cropped scoreboard images
+- `annotated_frames/` → the same frames with OCR bounding boxes + text drawn on them
+- `output_scoreboard.json` → structured OCR output, including reconstructed rows
+- `output_scoreboard.csv` → the same data, flattened for quick viewing in Excel/Sheets
 
 ---
 
@@ -112,61 +140,54 @@ redundant) and instead:
 {
     "frame": 120,
     "timestamp_sec": 4.0,
-    "detected_text": [
-        "TARUN",
-        "1",
-        "12",
-        "3 | 4 | 5",
-        "TTC",
-        "74",
-        "0",
-        "15",
-        "20"
+    "detected_text": ["TARUN", "1", "12", "3 | 4 | 5", "TTC", "74", "0", "15", "20"],
+    "rows": [
+        ["TARUN", "1", "12", "3 | 4 | 5"],
+        ["TTC", "74", "0", "15", "20"]
     ]
 }
 ```
 
-Each object represents one sampled frame and contains:
-- `frame` – frame number in the video
-- `timestamp_sec` – corresponding timestamp in seconds
-- `detected_text` – list of all text/numbers detected on the scoreboard for that frame
-  (player names, per-frame pin counts, running totals, etc.)
+Each object represents one *unique* sampled frame (duplicates skipped) and contains:
+- `frame` / `timestamp_sec` – which frame this is and when it occurs in the video
+- `detected_text` – flat list of everything OCR read off the scoreboard (kept for
+  backward compatibility / quick scanning)
+- `rows` – the same text, reconstructed into the scoreboard's actual row layout based
+  on each detection's vertical position
 
 ---
 
 ## 🎥 Demo Video
 
-The demo video (submitted alongside this repository) shows:
+The demo video (linked in the submission) shows:
 - The input bowling scoreboard video
 - The script running end-to-end in the terminal
-- The scoreboard region being detected and cropped
-- The final extracted JSON output
+- The scoreboard region being detected/cropped
+- The final extracted JSON/CSV output
 
 ---
 
 ## ⚠️ Assumptions & Limitations
 
-- Assumes the scoreboard is consistently positioned in the **top 40%** of the video frame.
-  For different camera angles/layouts, the ROI crop coordinates would need adjustment.
-- Sampling every 30th frame assumes a 30 FPS source video; this can be tuned for other
-  frame rates.
-- EasyOCR occasionally misreads visually similar characters (e.g., `0`/`O`, `1`/`I`)
-  under low-contrast or motion-blur conditions.
-- No frame-to-frame deduplication is currently applied — visually identical/static
-  scoreboard frames may produce repeated OCR results.
+- Assumes the scoreboard is consistently positioned in the **top 40%** of the frame by
+  default; this is a CLI flag (`--roi`) so it can be adjusted per video/camera angle.
+- Row grouping uses a fixed y-distance threshold (15px) to cluster detections into
+  rows — works well for this footage's resolution but may need tuning for very
+  different video resolutions.
+- EasyOCR occasionally misreads visually similar characters (e.g. `0`/`O`, `1`/`I`)
+  under low-contrast or motion-blur conditions; the annotated frames make it easy to
+  spot exactly which detections these were.
 
 ---
 
 ## 🚀 Future Improvements
 
-- Auto-detect the scoreboard region dynamically (e.g., via template matching or a
-  lightweight object detector) instead of a fixed crop percentage.
-- Deduplicate consecutive frames with identical scoreboard values to reduce redundant
-  output entries.
-- Map raw OCR text into a structured schema (per-player, per-frame pin counts + running
-  total) instead of a flat list of detected strings.
-- Add post-processing/spell-correction rules specific to bowling scoring conventions
-  (e.g., `X` for strike, `/` for spare) to improve accuracy.
+- Auto-detect the scoreboard region dynamically (template matching / lightweight
+  detector) instead of a fixed top-percentage crop.
+- Map reconstructed rows into a proper per-player schema (name, 10 frame scores,
+  running total) using bowling scoring conventions (`X` = strike, `/` = spare).
+- Track OCR confidence trends over time to auto-flag frames likely to have
+  misreads, instead of relying on a single static threshold.
 
 ---
 
@@ -174,6 +195,6 @@ The demo video (submitted alongside this repository) shows:
 
 **Jatindra Patel**
 Data Analyst Intern | Aspiring BI/Data Analyst
-[GitHub](https://github.com/JatindraPatel) • [LinkedIn](https://www.linkedin.com/in/jatindrapatel) • [Portfolio](https://jatindraportfolio.vercel.app/)
+[GitHub](https://github.com/JatindraPatel) • [LinkedIn](https://linkedin.com/in/jatindrapatel/) • [Portfolio](https://jatindraportfolio.vercel.app/)
 
 *Submitted for the Computer Vision Engineer Assignment (Round 1) at FOG.*
